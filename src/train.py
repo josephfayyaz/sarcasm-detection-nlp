@@ -138,11 +138,18 @@ def train_binary_model(
         loss_fct = CrossEntropyLoss(weight=weight_tensor)
     else:
         loss_fct = CrossEntropyLoss()
-    # Training loop
+    # Training loop with progress reporting
+    # Try to import tqdm for progress bars.  If unavailable, define a dummy function.
+    try:
+        from tqdm.auto import tqdm  # type: ignore
+    except Exception:
+        def tqdm(iterable, *args, **kwargs):  # type: ignore
+            return iterable
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
-        for batch in train_loader:
+        # Iterate over the training loader with a progress bar
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} [Training]"):
             # Move batch to device and separate labels from inputs.  Different
             # versions of the data collator may use ``label`` or ``labels`` as
             # the key for the target values.  Handle both cases gracefully.
@@ -166,7 +173,7 @@ def train_binary_model(
         all_logits = []
         all_labels = []
         with torch.no_grad():
-            for batch in eval_loader:
+            for batch in tqdm(eval_loader, desc=f"Epoch {epoch + 1}/{num_epochs} [Validation]"):
                 # Move batch to device and split labels similarly to the training loop
                 batch = {k: v.to(device) for k, v in batch.items()}
                 if "label" in batch:
