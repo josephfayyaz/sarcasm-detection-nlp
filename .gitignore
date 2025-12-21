@@ -208,3 +208,4 @@ __marimo__/
 nlp/Scripts/activate
 nlp/Scripts/activate.bat
 /nlp
+/model_output
