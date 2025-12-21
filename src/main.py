@@ -43,7 +43,7 @@ def main():
     train_parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device")
     # Set a small default number of epochs for quicker initial experiments.  The
     # user can override this with --num_epochs.
-    train_parser.add_argument("--num_epochs", type=int, default=2, help="Number of training epochs")
+    train_parser.add_argument("--num_epochs", type=int, default=20, help="Number of training epochs")
     train_parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
     train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
     train_parser.add_argument("--no_class_weights", action="store_true", help="Disable class weights")
