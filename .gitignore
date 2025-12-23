@@ -209,3 +209,8 @@ nlp/Scripts/activate
 nlp/Scripts/activate.bat
 /nlp
 /model_output
+src/model_output/
+# trainer checkpoints
+**/checkpoint-*/
+**/runs/
+**/__pycache__/

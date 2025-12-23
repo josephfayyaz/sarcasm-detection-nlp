@@ -1,5 +1,5 @@
 """
-Minimal FastAPI application for serving the BESSTIE sarcasm/sentiment detector.
+Minimal FastAPI application for serving the BESSTIE sarcasm/sentiment detector.  ssss
 
 This API exposes a single endpoint, ``/predict``, which accepts a JSON
 payload containing a list of texts and returns the predicted labels (0 or
@@ -31,15 +31,17 @@ class PredictResponse(BaseModel):
     predictions: List[int]
 
 
-def create_app(model_name: str, checkpoint_dir: str) -> FastAPI:
-    """Factory to create a FastAPI app with pre‑loaded model.
+def create_app(checkpoint_dir: str) -> FastAPI:
+    """Factory to create a FastAPI app with a pre‑loaded model.
+
+    The model and tokenizer are both loaded from the ``checkpoint_dir``.  This
+    mirrors the behaviour of the inference helper and ensures that any
+    special tokens added during training are correctly handled.
 
     Parameters
     ----------
-    model_name : str
-        Base model architecture used for training.
     checkpoint_dir : str
-        Directory containing the fine‑tuned model files.
+        Directory containing the fine‑tuned model and tokenizer.
 
     Returns
     -------
@@ -47,26 +49,26 @@ def create_app(model_name: str, checkpoint_dir: str) -> FastAPI:
         Configured application.
     """
     app = FastAPI(title="BESSTIE Figurative Language Detection API")
-    # Pre‑load model and tokenizer once
-    # Use closure to capture them in endpoint
+    # Pre‑load model and tokenizer once.  Use closure to capture them in the endpoint.
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     import torch
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
     model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir)
     model.eval()
+
     @app.post("/predict", response_model=PredictResponse)
     async def predict(request: PredictRequest) -> PredictResponse:
-        # Perform tokenisation and prediction
+        # Tokenise and predict.  Use CPU for inference to avoid GPU dependency.
         inputs = tokenizer(request.texts, padding=True, truncation=True, return_tensors="pt")
         with torch.no_grad():
             logits = model(**inputs).logits
         preds = logits.argmax(dim=-1).tolist()
         return PredictResponse(predictions=preds)
+
     return app
 
 
-# Instantiate default app using environment variables or hardcoded paths
+# Instantiate default app using environment variables or a default checkpoint directory
 import os
-MODEL_NAME = os.environ.get("BESSTIE_MODEL_NAME", "roberta-base")
 CHECKPOINT_DIR = os.environ.get("BESSTIE_CHECKPOINT_DIR", "./model_output")
-app = create_app(MODEL_NAME, CHECKPOINT_DIR)
+app = create_app(CHECKPOINT_DIR)

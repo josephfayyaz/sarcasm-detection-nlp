@@ -51,8 +51,8 @@ def predict_binary(model_name: str, checkpoint_dir: str, texts: List[str]) -> Li
 def main():
     parser = argparse.ArgumentParser(description="Generate predictions using a fine‑tuned BESSTIE model.")
     parser.add_argument("--model_name", type=str, default="roberta-base", help="Base model architecture used during training")
-    parser.add_argument("--checkpoint_dir", type=str, required=True, help="Directory containing the fine‑tuned model")
-    parser.add_argument("--input_file", type=str, help="CSV file with a 'text' column to predict labels for")
+    parser.add_argument("--checkpoint_dir", type=str, default= "./model_output/" , help="Directory containing the fine‑tuned model")
+    parser.add_argument("--input_file", type=str,default = "../dataset/valid.csv" ,help="CSV file with a 'text' column to predict labels for")
     parser.add_argument("--output_file", type=str, help="Where to save the CSV with predictions (optional)")
     parser.add_argument("--text", type=str, nargs="*", help="One or more texts to classify (if no input_file is provided)")
     args = parser.parse_args()

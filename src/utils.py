@@ -6,7 +6,7 @@ class‑weight computation and metric calculation.  Separating these utilities
 allows ``train.py`` and ``inference.py`` to stay concise.
 
 The functions here are general enough to be reused for both binary and
-multi‑task classification settings.
+multi‑task classification settings.wwww
 """
 
 import os
@@ -172,20 +172,42 @@ def compute_class_weights(labels: np.ndarray) -> Dict[int, float]:
 
 
 def compute_metrics(eval_pred) -> Dict[str, float]:
-    """Compute accuracy, precision, recall and F1 for binary classification.
+    """Compute classification metrics for a binary task.
+
+    This function returns both micro‑averaged (binary) and macro‑averaged
+    precision, recall and F1 scores, along with overall accuracy.  The
+    macro‑averaged F1 score is used in the BESSTIE paper to evaluate
+    performance across classes without weighting by their support【180316227421938†L605-L606】.
 
     Parameters
     ----------
     eval_pred : Tuple[np.ndarray, np.ndarray]
-        A tuple ``(logits, labels)`` as returned by Hugging Face ``Trainer``.
+        A tuple ``(logits, labels)`` containing model outputs and ground‑truth labels.
 
     Returns
     -------
     Dict[str, float]
-        Dictionary containing ``accuracy``, ``precision``, ``recall`` and ``f1``.
+        Metrics including ``accuracy``, ``precision_micro``, ``recall_micro``, ``f1_micro``,
+        ``precision_macro``, ``recall_macro`` and ``f1_macro``.
     """
     logits, labels = eval_pred
+    # Convert logits to predicted class indices
     preds = np.argmax(logits, axis=-1)
-    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average="binary")
+    # Micro (binary) metrics weight classes by support
+    precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(
+        labels, preds, average="binary"
+    )
+    # Macro metrics treat each class equally regardless of support
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        labels, preds, average="macro"
+    )
     acc = accuracy_score(labels, preds)
-    return {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1}
+    return {
+        "accuracy": acc,
+        "precision_micro": precision_micro,
+        "recall_micro": recall_micro,
+        "f1_micro": f1_micro,
+        "precision_macro": precision_macro,
+        "recall_macro": recall_macro,
+        "f1_macro": f1_macro,
+    }
