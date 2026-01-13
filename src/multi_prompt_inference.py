@@ -280,9 +280,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Multi-prompt (multi-template) inference for YOUR fine-tuned sarcasm classifier."
     )
-    parser.add_argument("--checkpoint_dir", type=str, required=True,
+    parser.add_argument("--checkpoint_dir", type=str, default = "../output_models/1/",
                         help="Path to your trained model folder (contains config.json + model.safetensors + tokenizer files).")
-    parser.add_argument("--input_file", type=str, required=True,
+    parser.add_argument("--input_file", type=str, default = "../dataset/valid.csv",
                         help="CSV file (BESSTIE valid/test) containing at least: text, label, task, variety.")
     parser.add_argument("--output_file", type=str, default="multi_prompt_predictions.csv",
                         help="Where to save CSV with per-template and aggregated predictions.")
