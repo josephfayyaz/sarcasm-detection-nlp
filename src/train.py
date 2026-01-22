@@ -263,7 +263,7 @@ def main():
     parser.add_argument(
         "--num_epochs",
         type=int,
-        default=30,
+        default=10,
         help="Number of training epochs (default 30 to match the BESSTIE paper)",
     )
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
