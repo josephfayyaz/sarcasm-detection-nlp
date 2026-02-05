@@ -107,6 +107,7 @@ def prepare_dataset(
     dataset: DatasetDict,
     text_column: str = "text",
     label_column: str = "label",
+    max_length: Optional[int] = None,
 ) -> DatasetDict:
     """Tokenise the text column and cast labels to integers.
 
@@ -125,6 +126,9 @@ def prepare_dataset(
         Name of the column containing the raw text.
     label_column : str, optional
         Name of the column containing the label.
+    max_length : int, optional
+        Maximum sequence length for truncation.  If ``None``, the tokenizer's
+        default max length is used.
 
     Returns
     -------
@@ -132,7 +136,7 @@ def prepare_dataset(
         Tokenised version of the dataset.
     """
     def tokenize_function(examples):
-        return tokenizer(examples[text_column], truncation=True)
+        return tokenizer(examples[text_column], truncation=True, max_length=max_length)
     remove_cols = [c for c in dataset["train"].column_names if c not in {text_column, label_column}]
     tokenised = dataset.map(tokenize_function, batched=True, remove_columns=remove_cols)
     # Ensure the label is an integer.  Casting via cast_column may fail when the

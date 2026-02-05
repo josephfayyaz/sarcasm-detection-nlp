@@ -20,8 +20,6 @@ from typing import List
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from inference import predict_binary
-
 
 class PredictRequest(BaseModel):
     texts: List[str]
@@ -54,13 +52,19 @@ def create_app(checkpoint_dir: str) -> FastAPI:
     import torch
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
     model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir)
+    device_str = os.environ.get("BESSTIE_DEVICE", "auto")
+    if device_str == "auto":
+        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_str)
+    model.to(device)
     model.eval()
 
     @app.post("/predict", response_model=PredictResponse)
     async def predict(request: PredictRequest) -> PredictResponse:
         # Tokenise and predict.  Use CPU for inference to avoid GPU dependency.
         inputs = tokenizer(request.texts, padding=True, truncation=True, return_tensors="pt")
-        with torch.no_grad():
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.inference_mode():
             logits = model(**inputs).logits
         preds = logits.argmax(dim=-1).tolist()
         return PredictResponse(predictions=preds)

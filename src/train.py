@@ -52,10 +52,19 @@ def train_binary_model(
     valid_file: Optional[str] = None,
     learning_rates: Optional[tuple] = None,
     batch_size: int = 8,
+    eval_batch_size: Optional[int] = None,
     num_epochs: int = 30,
     weight_decay: float = 0.01,
     seed: int = 42,
     use_class_weights: bool = True,
+    device: str = "auto",
+    num_workers: int = 2,
+    pin_memory: Optional[bool] = None,
+    grad_accum_steps: int = 1,
+    max_length: Optional[int] = None,
+    fp16: bool = False,
+    bf16: bool = False,
+    tf32: bool = False,
 ) -> None:
     """Fine‑tune a pre‑trained encoder model on BESSTIE for a binary task.
 
@@ -89,6 +98,8 @@ def train_binary_model(
         ``(1e-5, 2e-5, 3e-5)``.
     batch_size : int, optional
         Batch size per device (default 8).
+    eval_batch_size : int, optional
+        Batch size for evaluation.  Defaults to ``batch_size`` if not set.
     num_epochs : int, optional
         Number of training epochs (default 30 to match the paper【180316227421938†L563-L571】).
     weight_decay : float, optional
@@ -97,6 +108,23 @@ def train_binary_model(
         Random seed for reproducibility.
     use_class_weights : bool, optional
         Whether to apply class weights to mitigate imbalance【180316227421938†L573-L575】.
+    device : str, optional
+        ``"auto"``, ``"cuda"``, or ``"cpu"``.  ``"auto"`` selects CUDA when available.
+    num_workers : int, optional
+        DataLoader worker processes (set to 0 to disable multiprocessing).
+    pin_memory : bool, optional
+        Whether to pin CPU memory for faster host-to-device transfer.  Defaults
+        to ``True`` when using CUDA.
+    grad_accum_steps : int, optional
+        Gradient accumulation steps to increase effective batch size.
+    max_length : int, optional
+        Maximum sequence length for tokenisation.
+    fp16 : bool, optional
+        Use FP16 mixed precision on CUDA.
+    bf16 : bool, optional
+        Use BF16 mixed precision on CUDA (requires hardware support).
+    tf32 : bool, optional
+        Enable TF32 matmul for faster training on Ampere+ GPUs.
 
     Returns
     -------
@@ -115,7 +143,7 @@ def train_binary_model(
     # Initialise tokenizer once (reused across learning rate runs)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # Preprocess dataset once
-    tokenised_dataset = prepare_dataset(tokenizer, dataset)
+    tokenised_dataset = prepare_dataset(tokenizer, dataset, max_length=max_length)
     # Compute class weights if requested
     class_weights = None
     if use_class_weights:
@@ -129,8 +157,44 @@ def train_binary_model(
     tokenised_dataset["validation"].set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
     from torch.utils.data import DataLoader
-    train_loader = DataLoader(tokenised_dataset["train"], batch_size=batch_size, shuffle=True, collate_fn=collator)
-    eval_loader = DataLoader(tokenised_dataset["validation"], batch_size=batch_size, shuffle=False, collate_fn=collator)
+    if eval_batch_size is None:
+        eval_batch_size = batch_size
+    if fp16 and bf16:
+        raise ValueError("Choose only one of fp16 or bf16.")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+    use_cuda = device.type == "cuda"
+    if pin_memory is None:
+        pin_memory = use_cuda
+    if tf32 and use_cuda:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "persistent_workers": num_workers > 0,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = 2
+    train_loader = DataLoader(
+        tokenised_dataset["train"],
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collator,
+        **loader_kwargs,
+    )
+    eval_loader = DataLoader(
+        tokenised_dataset["validation"],
+        batch_size=eval_batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        **loader_kwargs,
+    )
     # Try to import tqdm for progress bars.  If unavailable, define a dummy function.
     try:
         from tqdm.auto import tqdm  # type: ignore
@@ -140,12 +204,20 @@ def train_binary_model(
     # Set random seed for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
-    # Determine device once
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if use_cuda:
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = True
     # Track the best model and its metric
     best_f1_macro = -float("inf")
     best_model = None
     best_lr = None
+    autocast_dtype = None
+    if use_cuda and fp16:
+        autocast_dtype = torch.float16
+    elif use_cuda and bf16:
+        autocast_dtype = torch.bfloat16
+    use_autocast = autocast_dtype is not None
+    scaler = torch.cuda.amp.GradScaler(enabled=use_cuda and fp16)
     # Iterate over candidate learning rates
     for lr in learning_rates:
         print(f"\n*** Training with learning rate {lr}" )
@@ -168,8 +240,12 @@ def train_binary_model(
         for epoch in range(num_epochs):
             model.train()
             epoch_loss = 0.0
-            for batch in tqdm(train_loader, desc=f"LR {lr} Epoch {epoch + 1}/{num_epochs} [Training]"):
-                batch = {k: v.to(device) for k, v in batch.items()}
+            optimizer.zero_grad(set_to_none=True)
+            for step, batch in enumerate(
+                tqdm(train_loader, desc=f"LR {lr} Epoch {epoch + 1}/{num_epochs} [Training]"),
+                start=1,
+            ):
+                batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
                 if "label" in batch:
                     labels = batch.pop("label")
                 elif "labels" in batch:
@@ -178,21 +254,38 @@ def train_binary_model(
                     raise KeyError(
                         "Neither 'label' nor 'labels' found in batch: keys=" + str(list(batch.keys()))
                     )
-                optimizer.zero_grad()
-                outputs = model(**batch)
-                logits = outputs.logits
-                loss = loss_fct(logits.view(-1, 2), labels.view(-1))
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
+                with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
+                    outputs = model(**batch)
+                    logits = outputs.logits
+                    loss = loss_fct(logits.view(-1, 2), labels.view(-1))
+                    loss = loss / max(1, grad_accum_steps)
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                epoch_loss += loss.item() * max(1, grad_accum_steps)
+                if step % max(1, grad_accum_steps) == 0:
+                    if scaler.is_enabled():
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+            if len(train_loader) % max(1, grad_accum_steps) != 0:
+                if scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             avg_loss = epoch_loss / len(train_loader)
             # Validation
             model.eval()
             all_logits = []
             all_labels = []
-            with torch.no_grad():
+            with torch.inference_mode():
                 for batch in tqdm(eval_loader, desc=f"LR {lr} Epoch {epoch + 1}/{num_epochs} [Validation]"):
-                    batch = {k: v.to(device) for k, v in batch.items()}
+                    batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
                     if "label" in batch:
                         val_labels = batch.pop("label")
                     elif "labels" in batch:
@@ -201,8 +294,9 @@ def train_binary_model(
                         raise KeyError(
                             "Neither 'label' nor 'labels' found in batch during evaluation"
                         )
-                    outputs = model(**batch)
-                    logits_val = outputs.logits
+                    with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
+                        outputs = model(**batch)
+                        logits_val = outputs.logits
                     all_logits.append(logits_val.cpu().numpy())
                     all_labels.append(val_labels.cpu().numpy())
             all_logits_np = np.concatenate(all_logits, axis=0)
@@ -223,7 +317,8 @@ def train_binary_model(
         else:
             # Free memory for the model that's not selected
             del model
-            torch.cuda.empty_cache()
+            if use_cuda:
+                torch.cuda.empty_cache()
     # Save the best model and tokenizer
     import os
     os.makedirs(output_dir, exist_ok=True)
@@ -260,6 +355,7 @@ def main():
         help="One or more learning rates to evaluate. Defaults to the three values used in the BESSTIE paper",
     )
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device")
+    parser.add_argument("--eval_batch_size", type=int, help="Batch size for evaluation (defaults to --batch_size)")
     parser.add_argument(
         "--num_epochs",
         type=int,
@@ -269,6 +365,14 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--no_class_weights", action="store_true", help="Disable class weights for the loss function")
+    parser.add_argument("--device", type=str, default="auto", help="Device: auto, cuda, or cpu")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader worker processes")
+    parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader")
+    parser.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps")
+    parser.add_argument("--max_length", type=int, help="Max sequence length for tokenization")
+    parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision on CUDA")
+    parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision on CUDA")
+    parser.add_argument("--tf32", action="store_true", help="Enable TF32 matmul on Ampere+ GPUs")
     args = parser.parse_args()
     # Train the model.  The function handles saving the best model to ``output_dir``.
     train_binary_model(
@@ -283,6 +387,15 @@ def main():
         weight_decay=args.weight_decay,
         seed=args.seed,
         use_class_weights=not args.no_class_weights,
+        eval_batch_size=args.eval_batch_size,
+        device=args.device,
+        num_workers=args.num_workers,
+        pin_memory=False if args.no_pin_memory else None,
+        grad_accum_steps=args.grad_accum_steps,
+        max_length=args.max_length,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        tf32=args.tf32,
     )
     print(f"Training complete. Best model saved to {args.output_dir}")
 
