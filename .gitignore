@@ -215,3 +215,4 @@ src/model_output/
 **/runs/
 **/__pycache__/
 /output_models/
+main_2.ipynb
