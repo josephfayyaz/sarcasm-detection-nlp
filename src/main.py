@@ -1,166 +1,331 @@
-  
+# """
+# Thin entry point for the BESSTIE figurative language project (config-first).
 
+# Design goals:
+# - main.py is kept small and readable.
+# - All defaults live in the config file (YAML/JSON).
+# - CLI flags override config values.
+# - Fail loudly on missing required keys or unknown keys.
 
-"""
-Entry point for the BESSTIE figurative language project.
-
-This script wraps the ``train.py`` and ``inference.py`` modules into a single
-command‑line interface using subcommands.  The ``train`` subcommand launches
-training of a new model, while the ``predict`` subcommand runs inference on
-new texts or a CSV file. 
-
-Example usage::
-
-    # Train a sarcasm detector
-    python main.py train --task Sarcasm \
-        --train_file train.csv --valid_file valid.csv --output_dir ./sarcasm_model
-
-    # Predict sarcasm labels for a list of sentences
-    python main.py predict --checkpoint_dir ./sarcasm_model --text "This is great" "Not impressed"
-
-    # Predict on a CSV file
-    python main.py predict --checkpoint_dir ./sarcasm_model --input_file new_data.csv
-"""
+# Usage:
+#   python main.py train --config config.yaml
+#   python main.py train --config config.yaml --num_epochs 5 --learning_rates 2e-5
+#   python main.py predict --config config.yaml --text "yeah right..."
+#   python main.py predict --config config.yaml --input_file test.csv
+# """
 
 import argparse
+import json
+import os
 import sys
+from typing import Any, Dict, Optional, Set
 
 from train import train_binary_model
 from inference import predict_binary
 
 
-def main():
-    parser = argparse.ArgumentParser(description="BESSTIE figurative language detection")
+# ---------------------------
+# Config
+# ---------------------------
+
+def load_config(path: str) -> Dict[str, Any]:
+    if not path:
+        raise ValueError("You must provide --config <path to .yaml/.yml/.json>")
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    _, ext = os.path.splitext(path.lower())
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    if ext == ".json":
+        return json.loads(text)
+
+    if ext in {".yml", ".yaml"}:
+        try:
+            import yaml  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "YAML config requested but PyYAML is not installed. "
+                "Install with: pip install pyyaml  OR use a .json config instead."
+            ) from e
+        return yaml.safe_load(text) or {}
+
+    raise ValueError(f"Unsupported config extension '{ext}'. Use .yaml/.yml or .json.")
+
+
+def allowed_keys() -> Dict[str, Set[str]]:
+    return {
+        "common": {"device"},
+        "train": {
+            "model_name", "task", "train_file", "valid_file", "output_dir",
+            "learning_rates", "batch_size", "eval_batch_size", "num_epochs",
+            "weight_decay", "seed", "use_class_weights",
+            "num_workers", "pin_memory", "grad_accum_steps", "max_length",
+            "fp16", "bf16", "tf32",
+        },
+        "predict": {
+            "checkpoint_dir", "input_file", "output_file", "text",
+            "device", "batch_size", "max_length", "fp16", "bf16",
+        },
+    }
+
+
+def validate_config(cfg: Dict[str, Any]) -> None:
+    if not isinstance(cfg, dict):
+        raise ValueError("Config must be a dict at the top level.")
+
+    allowed = allowed_keys()
+
+    # top-level sections
+    for section in cfg.keys():
+        if section not in allowed:
+            raise ValueError(
+                f"Unknown top-level section '{section}'. Allowed: {sorted(allowed.keys())}"
+            )
+
+    # section keys
+    for section, val in cfg.items():
+        if val is None:
+            continue
+        if not isinstance(val, dict):
+            raise ValueError(f"Section '{section}' must be a mapping/dict.")
+        unknown = set(val.keys()) - allowed[section]
+        if unknown:
+            raise ValueError(
+                f"Unknown keys in section '{section}': {sorted(unknown)}. "
+                f"Allowed: {sorted(allowed[section])}"
+            )
+
+
+def require(cfg: Dict[str, Any], section: str, key: str) -> Any:
+    val = cfg.get(section, {}).get(key)
+    if val is None:
+        raise ValueError(f"Missing required config value: {section}.{key}")
+    return val
+
+
+def get(cfg: Dict[str, Any], section: str, key: str, default=None) -> Any:
+    return cfg.get(section, {}).get(key, default)
+
+
+def coalesce(cli_val, cfg_val):
+    """CLI overrides config when CLI value is not None."""
+    return cfg_val if cli_val is None else cli_val
+
+
+# ---------------------------
+# CLI
+# ---------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="BESSTIE figurative language detection (config-first)")
+    parser.add_argument("--config", type=str, required=True, help="Path to config file (.yaml/.yml or .json).")
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Train subcommand
-    train_parser = subparsers.add_parser("train", help="Fine‑tune a model on BESSTIE")
-    train_parser.add_argument(
-        "--model_name",
-        type=str,
-        default="roberta-large",
-        help="Pre‑trained model to fine‑tune (default 'roberta-large' to match the paper)",
-    )
-    train_parser.add_argument("--task", type=str, choices=["Sentiment", "Sarcasm"], default="Sarcasm")
-    train_parser.add_argument("--train_file", type=str, default="../dataset/train.csv", help="Path to train.csv (optional)")
-    train_parser.add_argument("--valid_file", type=str, default="../dataset/valid.csv", help="Path to valid.csv (optional)")
-    train_parser.add_argument("--output_dir", type=str, default="./model_output", help="Output directory for the model")
-    # Accept a list of learning rates for grid search (default values from the paper)
-    train_parser.add_argument(
-        "--learning_rates",
-        type=float,
-        nargs="+",
-        default=[1e-5, 2e-5, 3e-5],
-        help="One or more learning rates to evaluate (default uses the values from the BESSTIE paper)",
-    )
-    train_parser.add_argument("--batch_size", type=int, default=8, help="Batch size per device")
-    train_parser.add_argument(
-        "--num_epochs",
-        type=int,
-        default=10,
-        help="Number of training epochs (default 30 to match the paper)",
-    )
-    train_parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
-    train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    train_parser.add_argument("--no_class_weights", action="store_true", help="Disable class weights")
-    train_parser.add_argument("--eval_batch_size", type=int, help="Batch size for evaluation (defaults to --batch_size)")
-    train_parser.add_argument("--device", type=str, default="auto", help="Device: auto, cuda, or cpu")
-    train_parser.add_argument("--num_workers", type=int, default=2, help="DataLoader worker processes")
-    train_parser.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory in DataLoader")
-    train_parser.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps")
-    train_parser.add_argument("--max_length", type=int, help="Max sequence length for tokenization")
-    train_parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision on CUDA")
-    train_parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision on CUDA")
-    train_parser.add_argument("--tf32", action="store_true", help="Enable TF32 matmul on Ampere+ GPUs")
+    # Train
+    t = subparsers.add_parser("train", help="Fine-tune a model on BESSTIE")
+    t.add_argument("--model_name", type=str, default=None)
+    t.add_argument("--task", type=str, choices=["Sentiment", "Sarcasm"], default=None)
+    t.add_argument("--train_file", type=str, default=None)
+    t.add_argument("--valid_file", type=str, default=None)
+    t.add_argument("--output_dir", type=str, default=None)
+    t.add_argument("--learning_rates", type=float, nargs="+", default=None)
+    t.add_argument("--batch_size", type=int, default=None)
+    t.add_argument("--eval_batch_size", type=int, default=None)
+    t.add_argument("--num_epochs", type=int, default=None)
+    t.add_argument("--weight_decay", type=float, default=None)
+    t.add_argument("--seed", type=int, default=None)
+    t.add_argument("--no_class_weights", action="store_true", help="Disable class weights (CLI override)")
+    t.add_argument("--device", type=str, default=None, help="auto, cuda, or cpu")
+    t.add_argument("--num_workers", type=int, default=None)
+    t.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory (CLI override)")
+    t.add_argument("--grad_accum_steps", type=int, default=None)
+    t.add_argument("--max_length", type=int, default=None)
+    t.add_argument("--fp16", action="store_true")
+    t.add_argument("--bf16", action="store_true")
+    t.add_argument("--tf32", action="store_true")
 
-    # Predict subcommand
-    pred_parser = subparsers.add_parser("predict", help="Run inference with a fine‑tuned model")
-    # The checkpoint directory identifies the saved model and tokenizer.  The base model name is no longer required.
-    pred_parser.add_argument(
-        "--checkpoint_dir",
-        type=str,
-        default="./model_output",
-        help="Directory containing the fine‑tuned model (defaults to './model_output').",
-    )
-    pred_parser.add_argument("--input_file", type=str, help="CSV file with a 'text' column for batch prediction")
-    pred_parser.add_argument("--output_file", type=str, help="Output CSV file path for predictions")
-    pred_parser.add_argument("--text", type=str, nargs="*", help="One or more texts for single prediction")
-    pred_parser.add_argument("--device", type=str, default="auto", help="Device: auto, cuda, or cpu")
-    pred_parser.add_argument("--batch_size", type=int, default=32, help="Batch size for inference")
-    pred_parser.add_argument("--max_length", type=int, default=256, help="Max sequence length for tokenization")
-    pred_parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision on CUDA")
-    pred_parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision on CUDA")
+    # Predict
+    p = subparsers.add_parser("predict", help="Run inference with a fine-tuned model")
+    p.add_argument("--checkpoint_dir", type=str, default=None)
+    p.add_argument("--input_file", type=str, default=None)
+    p.add_argument("--output_file", type=str, default=None)
+    p.add_argument("--text", type=str, nargs="*", default=None)
+    p.add_argument("--device", type=str, default=None, help="auto, cuda, or cpu")
+    p.add_argument("--batch_size", type=int, default=None)
+    p.add_argument("--max_length", type=int, default=None)
+    p.add_argument("--fp16", action="store_true")
+    p.add_argument("--bf16", action="store_true")
 
-    args = parser.parse_args()
+    return parser
+
+
+# ---------------------------
+# Run
+# ---------------------------
+
+def main():
+    args = build_parser().parse_args()
+    cfg = load_config(args.config)
+    validate_config(cfg)
+
+    # device: allow common.device and per-command override
+    common_device = get(cfg, "common", "device", None)
 
     if args.command == "train":
-        # The training function handles model saving to the output directory
+        # Required for train (config is the source of truth)
+        model_name = require(cfg, "train", "model_name")
+        task = require(cfg, "train", "task")
+        train_file = require(cfg, "train", "train_file")
+        valid_file = require(cfg, "train", "valid_file")
+        output_dir = require(cfg, "train", "output_dir")
+
+        # Optional but recommended keys; if missing, we fail fast so config stays complete.
+        learning_rates = require(cfg, "train", "learning_rates")
+        batch_size = require(cfg, "train", "batch_size")
+        num_epochs = require(cfg, "train", "num_epochs")
+        weight_decay = require(cfg, "train", "weight_decay")
+        seed = require(cfg, "train", "seed")
+        use_class_weights = require(cfg, "train", "use_class_weights")
+        num_workers = require(cfg, "train", "num_workers")
+        pin_memory = require(cfg, "train", "pin_memory")
+        grad_accum_steps = require(cfg, "train", "grad_accum_steps")
+        max_length = require(cfg, "train", "max_length")
+        fp16 = require(cfg, "train", "fp16")
+        bf16 = require(cfg, "train", "bf16")
+        tf32 = require(cfg, "train", "tf32")
+
+        # Config keys that can be null:
+        eval_batch_size = get(cfg, "train", "eval_batch_size", None)
+
+        # Apply CLI overrides
+        model_name = coalesce(args.model_name, model_name)
+        task = coalesce(args.task, task)
+        train_file = coalesce(args.train_file, train_file)
+        valid_file = coalesce(args.valid_file, valid_file)
+        output_dir = coalesce(args.output_dir, output_dir)
+        learning_rates = coalesce(args.learning_rates, learning_rates)
+        batch_size = coalesce(args.batch_size, batch_size)
+        eval_batch_size = coalesce(args.eval_batch_size, eval_batch_size)
+        num_epochs = coalesce(args.num_epochs, num_epochs)
+        weight_decay = coalesce(args.weight_decay, weight_decay)
+        seed = coalesce(args.seed, seed)
+        num_workers = coalesce(args.num_workers, num_workers)
+        grad_accum_steps = coalesce(args.grad_accum_steps, grad_accum_steps)
+        max_length = coalesce(args.max_length, max_length)
+
+        # device precedence: CLI > train.device > common.device
+        device = coalesce(args.device, get(cfg, "train", "device", common_device))
+
+        # booleans: CLI flags override config
+        if args.no_class_weights:
+            use_class_weights = False
+        if args.no_pin_memory:
+            pin_memory = False
+        if args.fp16:
+            fp16 = True
+        if args.bf16:
+            bf16 = True
+        if args.tf32:
+            tf32 = True
+
         train_binary_model(
-            model_name=args.model_name,
-            task=args.task,
-            output_dir=args.output_dir,
-            train_file=args.train_file,
-            valid_file=args.valid_file,
-            learning_rates=tuple(args.learning_rates),
-            batch_size=args.batch_size,
-            num_epochs=args.num_epochs,
-            weight_decay=args.weight_decay,
-            seed=args.seed,
-            use_class_weights=not args.no_class_weights,
-            eval_batch_size=args.eval_batch_size,
-            device=args.device,
-            num_workers=args.num_workers,
-            pin_memory=False if args.no_pin_memory else None,
-            grad_accum_steps=args.grad_accum_steps,
-            max_length=args.max_length,
-            fp16=args.fp16,
-            bf16=args.bf16,
-            tf32=args.tf32,
+            model_name=model_name,
+            task=task,
+            output_dir=output_dir,
+            train_file=train_file,
+            valid_file=valid_file,
+            learning_rates=tuple(learning_rates),
+            batch_size=int(batch_size),
+            num_epochs=int(num_epochs),
+            weight_decay=float(weight_decay),
+            seed=int(seed),
+            use_class_weights=bool(use_class_weights),
+            eval_batch_size=eval_batch_size,
+            device=device,
+            num_workers=int(num_workers),
+            pin_memory=bool(pin_memory),
+            grad_accum_steps=int(grad_accum_steps),
+            max_length=int(max_length),
+            fp16=bool(fp16),
+            bf16=bool(bf16),
+            tf32=bool(tf32),
         )
-        print(f"Training complete. Best model saved to {args.output_dir}")
+        print(f"Training complete. Best model saved to {output_dir}")
+
     elif args.command == "predict":
-        if args.input_file:
+        checkpoint_dir = require(cfg, "predict", "checkpoint_dir")
+        input_file = get(cfg, "predict", "input_file", None)
+        output_file = get(cfg, "predict", "output_file", None)
+        text_list = get(cfg, "predict", "text", []) or []
+        batch_size = require(cfg, "predict", "batch_size")
+        max_length = require(cfg, "predict", "max_length")
+        fp16 = require(cfg, "predict", "fp16")
+        bf16 = require(cfg, "predict", "bf16")
+
+        # Apply CLI overrides
+        checkpoint_dir = coalesce(args.checkpoint_dir, checkpoint_dir)
+        input_file = coalesce(args.input_file, input_file)
+        output_file = coalesce(args.output_file, output_file)
+        if args.text is not None:
+            text_list = args.text
+        batch_size = coalesce(args.batch_size, batch_size)
+        max_length = coalesce(args.max_length, max_length)
+
+        # device precedence: CLI > predict.device > common.device
+        device = coalesce(args.device, get(cfg, "predict", "device", common_device))
+
+        # boolean overrides
+        if args.fp16:
+            fp16 = True
+        if args.bf16:
+            bf16 = True
+
+        if input_file:
             import pandas as pd
-            import os
-            if not os.path.exists(args.input_file):
-                print(f"Input file {args.input_file} does not exist", file=sys.stderr)
+
+            if not os.path.exists(input_file):
+                print(f"Input file {input_file} does not exist", file=sys.stderr)
                 sys.exit(1)
-            df = pd.read_csv(args.input_file)
+
+            df = pd.read_csv(input_file)
             if "text" not in df.columns:
                 print("Input CSV must contain a 'text' column", file=sys.stderr)
                 sys.exit(1)
+
             texts = df["text"].astype(str).tolist()
-            # The inference helper loads both the model and tokenizer from the checkpoint directory,
-            # so only ``checkpoint_dir`` and the texts are passed.
             preds = predict_binary(
-                args.checkpoint_dir,
+                checkpoint_dir,
                 texts,
-                device=args.device,
-                batch_size=args.batch_size,
-                max_length=args.max_length,
-                fp16=args.fp16,
-                bf16=args.bf16,
+                device=device,
+                batch_size=int(batch_size),
+                max_length=int(max_length),
+                fp16=bool(fp16),
+                bf16=bool(bf16),
             )
             df["prediction"] = preds
-            output_path = args.output_file or os.path.splitext(args.input_file)[0] + "_predictions.csv"
-            df.to_csv(output_path, index=False)
-            print(f"Predictions written to {output_path}")
+            out_path = output_file or os.path.splitext(input_file)[0] + "_predictions.csv"
+            df.to_csv(out_path, index=False)
+            print(f"Predictions written to {out_path}")
         else:
-            if not args.text:
-                print("Either --input_file or --text must be provided for prediction", file=sys.stderr)
+            if not text_list:
+                print("Either predict.input_file or predict.text must be set (in config or via CLI).", file=sys.stderr)
                 sys.exit(1)
+
             preds = predict_binary(
-                args.checkpoint_dir,
-                args.text,
-                device=args.device,
-                batch_size=args.batch_size,
-                max_length=args.max_length,
-                fp16=args.fp16,
-                bf16=args.bf16,
+                checkpoint_dir,
+                text_list,
+                device=device,
+                batch_size=int(batch_size),
+                max_length=int(max_length),
+                fp16=bool(fp16),
+                bf16=bool(bf16),
             )
-            for t, p in zip(args.text, preds):
-                label = "sarcastic/positive" if p == 1 else "non‑sarcastic/negative"
-                print(f"{t} -> {label}")
+            for t, p in zip(text_list, preds):
+                print(f"{p}\t{t}")
 
 
 if __name__ == "__main__":
