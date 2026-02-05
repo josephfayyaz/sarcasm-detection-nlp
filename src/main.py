@@ -2,23 +2,18 @@
 # Thin entry point for the BESSTIE figurative language project (config-first).
 
 # Design goals:
-# - main.py is kept small and readable.
+# - main.py stays readable.
 # - All defaults live in the config file (YAML/JSON).
 # - CLI flags override config values.
 # - Fail loudly on missing required keys or unknown keys.
-
-# Usage:
-#   python main.py train --config config.yaml
-#   python main.py train --config config.yaml --num_epochs 5 --learning_rates 2e-5
-#   python main.py predict --config config.yaml --text "yeah right..."
-#   python main.py predict --config config.yaml --input_file test.csv
+# - Accept --config ANYWHERE in the CLI (before/after subcommand).
 # """
 
 import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Set, Tuple, Optional
 
 from train import train_binary_model
 from inference import predict_binary
@@ -78,14 +73,12 @@ def validate_config(cfg: Dict[str, Any]) -> None:
 
     allowed = allowed_keys()
 
-    # top-level sections
     for section in cfg.keys():
         if section not in allowed:
             raise ValueError(
                 f"Unknown top-level section '{section}'. Allowed: {sorted(allowed.keys())}"
             )
 
-    # section keys
     for section, val in cfg.items():
         if val is None:
             continue
@@ -116,13 +109,30 @@ def coalesce(cli_val, cfg_val):
 
 
 # ---------------------------
-# CLI
+# CLI parsing (config anywhere)
 # ---------------------------
+
+def extract_config_path(argv: list[str]) -> Tuple[Optional[str], list[str]]:
+    """
+    Pull --config PATH out of argv no matter where it appears.
+    Returns: (config_path, argv_without_config_tokens)
+    """
+    if "--config" not in argv:
+        return None, argv
+
+    idx = argv.index("--config")
+    if idx == len(argv) - 1:
+        raise ValueError("--config provided without a path")
+
+    cfg_path = argv[idx + 1]
+    # remove the two tokens
+    new_argv = argv[:idx] + argv[idx + 2 :]
+    return cfg_path, new_argv
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="BESSTIE figurative language detection (config-first)")
-    parser.add_argument("--config", type=str, required=True, help="Path to config file (.yaml/.yml or .json).")
-
+    # NOTE: --config is handled separately so it can appear anywhere.
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Train
@@ -168,22 +178,27 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------
 
 def main():
-    args = build_parser().parse_args()
-    cfg = load_config(args.config)
+    # Make --config work anywhere:
+    cfg_path, argv_wo_cfg = extract_config_path(sys.argv[1:])
+
+    if not cfg_path:
+        raise ValueError("Missing --config. Example: python main.py train --config config.yaml")
+
+    cfg = load_config(cfg_path)
     validate_config(cfg)
 
-    # device: allow common.device and per-command override
+    args = build_parser().parse_args(argv_wo_cfg)
+
     common_device = get(cfg, "common", "device", None)
 
     if args.command == "train":
-        # Required for train (config is the source of truth)
+        # Required config values
         model_name = require(cfg, "train", "model_name")
         task = require(cfg, "train", "task")
         train_file = require(cfg, "train", "train_file")
         valid_file = require(cfg, "train", "valid_file")
         output_dir = require(cfg, "train", "output_dir")
 
-        # Optional but recommended keys; if missing, we fail fast so config stays complete.
         learning_rates = require(cfg, "train", "learning_rates")
         batch_size = require(cfg, "train", "batch_size")
         num_epochs = require(cfg, "train", "num_epochs")
@@ -198,10 +213,9 @@ def main():
         bf16 = require(cfg, "train", "bf16")
         tf32 = require(cfg, "train", "tf32")
 
-        # Config keys that can be null:
         eval_batch_size = get(cfg, "train", "eval_batch_size", None)
 
-        # Apply CLI overrides
+        # CLI overrides
         model_name = coalesce(args.model_name, model_name)
         task = coalesce(args.task, task)
         train_file = coalesce(args.train_file, train_file)
@@ -217,10 +231,9 @@ def main():
         grad_accum_steps = coalesce(args.grad_accum_steps, grad_accum_steps)
         max_length = coalesce(args.max_length, max_length)
 
-        # device precedence: CLI > train.device > common.device
         device = coalesce(args.device, get(cfg, "train", "device", common_device))
 
-        # booleans: CLI flags override config
+        # Boolean overrides
         if args.no_class_weights:
             use_class_weights = False
         if args.no_pin_memory:
@@ -266,7 +279,7 @@ def main():
         fp16 = require(cfg, "predict", "fp16")
         bf16 = require(cfg, "predict", "bf16")
 
-        # Apply CLI overrides
+        # CLI overrides
         checkpoint_dir = coalesce(args.checkpoint_dir, checkpoint_dir)
         input_file = coalesce(args.input_file, input_file)
         output_file = coalesce(args.output_file, output_file)
@@ -275,10 +288,8 @@ def main():
         batch_size = coalesce(args.batch_size, batch_size)
         max_length = coalesce(args.max_length, max_length)
 
-        # device precedence: CLI > predict.device > common.device
         device = coalesce(args.device, get(cfg, "predict", "device", common_device))
 
-        # boolean overrides
         if args.fp16:
             fp16 = True
         if args.bf16:
@@ -312,7 +323,7 @@ def main():
             print(f"Predictions written to {out_path}")
         else:
             if not text_list:
-                print("Either predict.input_file or predict.text must be set (in config or via CLI).", file=sys.stderr)
+                print("Either predict.input_file or predict.text must be set (config or CLI).", file=sys.stderr)
                 sys.exit(1)
 
             preds = predict_binary(
