@@ -65,6 +65,9 @@ def train_binary_model(
     fp16: bool = False,
     bf16: bool = False,
     tf32: bool = False,
+    checkpoint_every_epochs: int = 2,
+    resume_from_checkpoint: bool = True,
+    checkpoint_dir: Optional[str] = None,
 ) -> None:
     """Fine‑tune a pre‑trained encoder model on BESSTIE for a binary task.
 
@@ -125,6 +128,12 @@ def train_binary_model(
         Use BF16 mixed precision on CUDA (requires hardware support).
     tf32 : bool, optional
         Enable TF32 matmul for faster training on Ampere+ GPUs.
+    checkpoint_every_epochs : int, optional
+        Save a training checkpoint every N epochs (default 2).
+    resume_from_checkpoint : bool, optional
+        If True, resume from the latest checkpoint found for each learning rate.
+    checkpoint_dir : str, optional
+        Directory to store checkpoints. Defaults to ``<output_dir>/checkpoints``.
 
     Returns
     -------
@@ -217,16 +226,93 @@ def train_binary_model(
     elif use_cuda and bf16:
         autocast_dtype = torch.bfloat16
     use_autocast = autocast_dtype is not None
-    scaler = torch.cuda.amp.GradScaler(enabled=use_cuda and fp16)
+
+    import os
+
+    if checkpoint_every_epochs < 0:
+        raise ValueError("checkpoint_every_epochs must be >= 0")
+    checkpoint_root = checkpoint_dir or os.path.join(output_dir, "checkpoints")
+
+    def _lr_tag(val: float) -> str:
+        return str(val).replace(".", "_").replace("-", "m")
+
+    def _find_latest_checkpoint(lr_dir: str):
+        if not os.path.isdir(lr_dir):
+            return None, None
+        best_epoch = None
+        best_path = None
+        for name in os.listdir(lr_dir):
+            if not name.startswith("epoch_"):
+                continue
+            try:
+                epoch_idx = int(name.split("_", 1)[1])
+            except ValueError:
+                continue
+            ckpt_path = os.path.join(lr_dir, name)
+            if best_epoch is None or epoch_idx > best_epoch:
+                best_epoch = epoch_idx
+                best_path = ckpt_path
+        return best_path, best_epoch
+
+    def _save_checkpoint(model, optimizer, scaler, lr_dir: str, epoch_idx: int):
+        ckpt_dir = os.path.join(lr_dir, f"epoch_{epoch_idx}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        model.save_pretrained(ckpt_dir)
+        torch.save(optimizer.state_dict(), os.path.join(ckpt_dir, "optimizer.pt"))
+        if scaler is not None and scaler.is_enabled():
+            torch.save(scaler.state_dict(), os.path.join(ckpt_dir, "scaler.pt"))
+        torch.save({"epoch": epoch_idx}, os.path.join(ckpt_dir, "training_state.pt"))
+
+    def _evaluate_model(model):
+        model.eval()
+        all_logits = []
+        all_labels = []
+        with torch.inference_mode():
+            for batch in tqdm(eval_loader, desc="Validation"):
+                batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
+                if "label" in batch:
+                    val_labels = batch.pop("label")
+                elif "labels" in batch:
+                    val_labels = batch.pop("labels")
+                else:
+                    raise KeyError(
+                        "Neither 'label' nor 'labels' found in batch during evaluation"
+                    )
+                with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
+                    outputs = model(**batch)
+                    logits_val = outputs.logits
+                all_logits.append(logits_val.cpu().numpy())
+                all_labels.append(val_labels.cpu().numpy())
+        all_logits_np = np.concatenate(all_logits, axis=0)
+        all_labels_np = np.concatenate(all_labels, axis=0)
+        return compute_metrics((all_logits_np, all_labels_np))
+
     # Iterate over candidate learning rates
     for lr in learning_rates:
         print(f"\n*** Training with learning rate {lr}" )
-        # Initialise a fresh model for each learning rate
-        model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
+        scaler = torch.cuda.amp.GradScaler(enabled=use_cuda and fp16)
+        start_epoch = 0
+        lr_dir = os.path.join(checkpoint_root, f"lr_{_lr_tag(lr)}")
+        ckpt_path, ckpt_epoch = (None, None)
+        if resume_from_checkpoint:
+            ckpt_path, ckpt_epoch = _find_latest_checkpoint(lr_dir)
+        if ckpt_path:
+            model = AutoModelForSequenceClassification.from_pretrained(ckpt_path)
+            start_epoch = int(ckpt_epoch)
+            print(f"[resume] Using checkpoint {ckpt_path} (next epoch {start_epoch + 1}/{num_epochs})")
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
         model.to(device)
         # Configure optimiser
         from torch.optim import AdamW
         optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        if ckpt_path:
+            opt_path = os.path.join(ckpt_path, "optimizer.pt")
+            if os.path.exists(opt_path):
+                optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+            scaler_path = os.path.join(ckpt_path, "scaler.pt")
+            if scaler.is_enabled() and os.path.exists(scaler_path):
+                scaler.load_state_dict(torch.load(scaler_path))
         # Set up loss function (weights on device)
         if class_weights is not None:
             weight_tensor = torch.tensor([
@@ -237,7 +323,8 @@ def train_binary_model(
         else:
             loss_fct = CrossEntropyLoss()
         # Training loop
-        for epoch in range(num_epochs):
+        metrics = None
+        for epoch in range(start_epoch, num_epochs):
             model.train()
             epoch_loss = 0.0
             optimizer.zero_grad(set_to_none=True)
@@ -279,34 +366,18 @@ def train_binary_model(
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             avg_loss = epoch_loss / len(train_loader)
-            # Validation
-            model.eval()
-            all_logits = []
-            all_labels = []
-            with torch.inference_mode():
-                for batch in tqdm(eval_loader, desc=f"LR {lr} Epoch {epoch + 1}/{num_epochs} [Validation]"):
-                    batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
-                    if "label" in batch:
-                        val_labels = batch.pop("label")
-                    elif "labels" in batch:
-                        val_labels = batch.pop("labels")
-                    else:
-                        raise KeyError(
-                            "Neither 'label' nor 'labels' found in batch during evaluation"
-                        )
-                    with torch.cuda.amp.autocast(enabled=use_autocast, dtype=autocast_dtype):
-                        outputs = model(**batch)
-                        logits_val = outputs.logits
-                    all_logits.append(logits_val.cpu().numpy())
-                    all_labels.append(val_labels.cpu().numpy())
-            all_logits_np = np.concatenate(all_logits, axis=0)
-            all_labels_np = np.concatenate(all_labels, axis=0)
-            metrics = compute_metrics((all_logits_np, all_labels_np))
+            metrics = _evaluate_model(model)
             print(
                 f"LR {lr} Epoch {epoch + 1}/{num_epochs} - Loss: {avg_loss:.4f} - "
                 f"Acc: {metrics['accuracy']:.4f}, F1_macro: {metrics['f1_macro']:.4f}, "
                 f"F1_micro: {metrics['f1_micro']:.4f}"
             )
+            if checkpoint_every_epochs and (epoch + 1) % checkpoint_every_epochs == 0:
+                _save_checkpoint(model, optimizer, scaler, lr_dir, epoch + 1)
+        if metrics is None:
+            metrics = _evaluate_model(model)
+        if checkpoint_every_epochs and (num_epochs % checkpoint_every_epochs) != 0:
+            _save_checkpoint(model, optimizer, scaler, lr_dir, num_epochs)
         # After full training at this learning rate, evaluate final performance
         # Use the last computed metrics (macro F1)
         f1_macro = metrics["f1_macro"]
@@ -373,6 +444,9 @@ def main():
     parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision on CUDA")
     parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision on CUDA")
     parser.add_argument("--tf32", action="store_true", help="Enable TF32 matmul on Ampere+ GPUs")
+    parser.add_argument("--checkpoint_every_epochs", type=int, default=2, help="Checkpoint every N epochs")
+    parser.add_argument("--no_resume_from_checkpoint", action="store_true", help="Disable auto-resume")
+    parser.add_argument("--checkpoint_dir", type=str, help="Optional checkpoint root directory")
     args = parser.parse_args()
     # Train the model.  The function handles saving the best model to ``output_dir``.
     train_binary_model(
@@ -396,6 +470,9 @@ def main():
         fp16=args.fp16,
         bf16=args.bf16,
         tf32=args.tf32,
+        checkpoint_every_epochs=args.checkpoint_every_epochs,
+        resume_from_checkpoint=not args.no_resume_from_checkpoint,
+        checkpoint_dir=args.checkpoint_dir,
     )
     print(f"Training complete. Best model saved to {args.output_dir}")
 

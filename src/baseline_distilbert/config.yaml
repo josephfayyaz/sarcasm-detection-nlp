@@ -6,7 +6,7 @@ common:
   device: auto          # auto | cuda | cpu
 
 train:
-  model_name: roberta-large
+  model_name: distilbert/distilbert-base-multilingual-cased
   task: Sarcasm          # Sarcasm | Sentiment
   train_file: ../dataset/train.csv
   valid_file: ../dataset/valid.csv
@@ -24,6 +24,10 @@ train:
   pin_memory: true
   grad_accum_steps: 1
   max_length: 256
+
+  checkpoint_every_epochs: 2
+  resume_from_checkpoint: true
+  checkpoint_dir: null
 
   fp16: false
   bf16: false
