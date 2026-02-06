@@ -46,6 +46,7 @@ def allowed_keys() -> Dict[str, Set[str]]:
             "bnb_4bit_quant_type", "bnb_4bit_use_double_quant", "compute_dtype",
             "prompt_sentiment", "prompt_sarcasm", "prompt_template",
             "fp16", "bf16", "tf32",
+            "log_every_seconds",
             "checkpoint_every_epochs", "resume_from_checkpoint", "checkpoint_dir",
         },
         "predict": {
@@ -147,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--fp16", action="store_true")
     t.add_argument("--bf16", action="store_true")
     t.add_argument("--tf32", action="store_true")
+    t.add_argument("--log_every_seconds", type=float, default=None)
     t.add_argument("--checkpoint_every_epochs", type=int, default=None)
     t.add_argument("--no_resume_from_checkpoint", action="store_true")
     t.add_argument("--checkpoint_dir", type=str, default=None)
@@ -218,6 +220,7 @@ def main():
         fp16 = require(cfg, "train", "fp16")
         bf16 = require(cfg, "train", "bf16")
         tf32 = require(cfg, "train", "tf32")
+        log_every_seconds = require(cfg, "train", "log_every_seconds")
         checkpoint_every_epochs = require(cfg, "train", "checkpoint_every_epochs")
         resume_from_checkpoint = require(cfg, "train", "resume_from_checkpoint")
         checkpoint_dir = get(cfg, "train", "checkpoint_dir", None)
@@ -246,6 +249,7 @@ def main():
         prompt_sentiment = coalesce(args.prompt_sentiment, prompt_sentiment)
         prompt_sarcasm = coalesce(args.prompt_sarcasm, prompt_sarcasm)
         prompt_template = coalesce(args.prompt_template, prompt_template)
+        log_every_seconds = coalesce(args.log_every_seconds, log_every_seconds)
         checkpoint_every_epochs = coalesce(args.checkpoint_every_epochs, checkpoint_every_epochs)
         checkpoint_dir = coalesce(args.checkpoint_dir, checkpoint_dir)
 
@@ -301,6 +305,7 @@ def main():
             fp16=bool(fp16),
             bf16=bool(bf16),
             tf32=bool(tf32),
+            log_every_seconds=float(log_every_seconds),
             checkpoint_every_epochs=int(checkpoint_every_epochs),
             resume_from_checkpoint=bool(resume_from_checkpoint),
             checkpoint_dir=checkpoint_dir,

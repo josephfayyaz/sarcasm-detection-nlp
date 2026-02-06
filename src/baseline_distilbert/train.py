@@ -23,6 +23,7 @@ and perform a grid search over the learning rate values {1e‑5, 2e‑5, 3e‑5}
 """
 
 import argparse
+import time
 from typing import Optional
 
 import numpy as np
@@ -65,6 +66,7 @@ def train_binary_model(
     fp16: bool = False,
     bf16: bool = False,
     tf32: bool = False,
+    log_every_seconds: float = 1.0,
     checkpoint_every_epochs: int = 2,
     resume_from_checkpoint: bool = True,
     checkpoint_dir: Optional[str] = None,
@@ -128,6 +130,8 @@ def train_binary_model(
         Use BF16 mixed precision on CUDA (requires hardware support).
     tf32 : bool, optional
         Enable TF32 matmul for faster training on Ampere+ GPUs.
+    log_every_seconds : float, optional
+        Log training progress every N seconds (default 1.0). Set to 0 to disable.
     checkpoint_every_epochs : int, optional
         Save a training checkpoint every N epochs (default 2).
     resume_from_checkpoint : bool, optional
@@ -145,13 +149,16 @@ def train_binary_model(
         # Use the three values specified in the BESSTIE paper
         learning_rates = (1e-5, 2e-5, 3e-5)
     # Load dataset either from CSV files or Hugging Face hub once
+    print("[info] loading dataset...")
     if train_file and valid_file:
         dataset = load_besstie_from_csv(train_file, valid_file, task=task)
     else:
         dataset = load_besstie_from_hf(task=task)
     # Initialise tokenizer once (reused across learning rate runs)
+    print("[info] loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # Preprocess dataset once
+    print("[info] tokenizing dataset...")
     tokenised_dataset = prepare_dataset(tokenizer, dataset, max_length=max_length)
     # Compute class weights if requested
     class_weights = None
@@ -159,6 +166,7 @@ def train_binary_model(
         labels_arr = np.array(tokenised_dataset["train"]["label"])
         class_weights = compute_class_weights(labels_arr)
     # Prepare data loaders (reuse for all runs)
+    print("[info] building dataloaders...")
     tokenised_dataset = tokenised_dataset.remove_columns([
         c for c in tokenised_dataset["train"].column_names if c not in {"input_ids", "attention_mask", "label"}
     ])
@@ -267,8 +275,10 @@ def train_binary_model(
         model.eval()
         all_logits = []
         all_labels = []
+        eval_start = time.time()
+        last_log = eval_start
         with torch.inference_mode():
-            for batch in tqdm(eval_loader, desc="Validation"):
+            for step, batch in enumerate(tqdm(eval_loader, desc="Validation"), start=1):
                 batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
                 if "label" in batch:
                     val_labels = batch.pop("label")
@@ -283,6 +293,11 @@ def train_binary_model(
                     logits_val = outputs.logits
                 all_logits.append(logits_val.cpu().numpy())
                 all_labels.append(val_labels.cpu().numpy())
+                if log_every_seconds and (time.time() - last_log) >= log_every_seconds:
+                    elapsed = time.time() - eval_start
+                    pct = (step / len(eval_loader)) * 100
+                    print(f"[eval] step {step}/{len(eval_loader)} ({pct:.1f}%) elapsed {elapsed:.1f}s")
+                    last_log = time.time()
         all_logits_np = np.concatenate(all_logits, axis=0)
         all_labels_np = np.concatenate(all_labels, axis=0)
         return compute_metrics((all_logits_np, all_labels_np))
@@ -327,6 +342,9 @@ def train_binary_model(
         for epoch in range(start_epoch, num_epochs):
             model.train()
             epoch_loss = 0.0
+            epoch_start = time.time()
+            last_log = epoch_start
+            samples_seen = 0
             optimizer.zero_grad(set_to_none=True)
             for step, batch in enumerate(
                 tqdm(train_loader, desc=f"LR {lr} Epoch {epoch + 1}/{num_epochs} [Training]"),
@@ -351,6 +369,7 @@ def train_binary_model(
                 else:
                     loss.backward()
                 epoch_loss += loss.item() * max(1, grad_accum_steps)
+                samples_seen += labels.size(0)
                 if step % max(1, grad_accum_steps) == 0:
                     if scaler.is_enabled():
                         scaler.step(optimizer)
@@ -358,6 +377,17 @@ def train_binary_model(
                     else:
                         optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
+                if log_every_seconds and (time.time() - last_log) >= log_every_seconds:
+                    elapsed = time.time() - epoch_start
+                    pct = (step / len(train_loader)) * 100
+                    avg_loss = epoch_loss / max(1, step)
+                    speed = samples_seen / max(1e-6, elapsed)
+                    print(
+                        f"[train] lr={lr} epoch {epoch + 1}/{num_epochs} "
+                        f"step {step}/{len(train_loader)} ({pct:.1f}%) "
+                        f"loss {avg_loss:.4f} samples/s {speed:.1f} elapsed {elapsed:.1f}s"
+                    )
+                    last_log = time.time()
             if len(train_loader) % max(1, grad_accum_steps) != 0:
                 if scaler.is_enabled():
                     scaler.step(optimizer)
@@ -444,6 +474,7 @@ def main():
     parser.add_argument("--fp16", action="store_true", help="Use FP16 mixed precision on CUDA")
     parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision on CUDA")
     parser.add_argument("--tf32", action="store_true", help="Enable TF32 matmul on Ampere+ GPUs")
+    parser.add_argument("--log_every_seconds", type=float, default=1.0, help="Log progress every N seconds (0 to disable)")
     parser.add_argument("--checkpoint_every_epochs", type=int, default=2, help="Checkpoint every N epochs")
     parser.add_argument("--no_resume_from_checkpoint", action="store_true", help="Disable auto-resume")
     parser.add_argument("--checkpoint_dir", type=str, help="Optional checkpoint root directory")
@@ -470,6 +501,7 @@ def main():
         fp16=args.fp16,
         bf16=args.bf16,
         tf32=args.tf32,
+        log_every_seconds=args.log_every_seconds,
         checkpoint_every_epochs=args.checkpoint_every_epochs,
         resume_from_checkpoint=not args.no_resume_from_checkpoint,
         checkpoint_dir=args.checkpoint_dir,

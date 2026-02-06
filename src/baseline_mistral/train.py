@@ -9,6 +9,7 @@ This follows the paper's decoder setup:
 """
 
 import argparse
+import time
 from typing import Optional, List
 
 import numpy as np
@@ -87,6 +88,8 @@ def _predict_labels(
     max_length: int,
     fp16: bool,
     bf16: bool,
+    log_every_seconds: float = 1.0,
+    log_prefix: str = "[eval]",
 ) -> List[int]:
     prompts = [
         build_prompt_text(task, t, prompt_sentiment, prompt_sarcasm, prompt_template)
@@ -101,8 +104,10 @@ def _predict_labels(
         autocast_dtype = torch.bfloat16
     use_autocast = autocast_dtype is not None
 
+    start = time.time()
+    last_log = start
     with torch.inference_mode():
-        for batch_prompts in loader:
+        for step, batch_prompts in enumerate(loader, start=1):
             inputs = tokenizer(
                 batch_prompts,
                 padding=True,
@@ -118,6 +123,11 @@ def _predict_labels(
             for tok_id in next_ids:
                 tok = tokenizer.decode([tok_id]).strip()
                 preds.append(_parse_label(tok))
+            if log_every_seconds and (time.time() - last_log) >= log_every_seconds:
+                elapsed = time.time() - start
+                pct = (step / len(loader)) * 100
+                print(f"{log_prefix} step {step}/{len(loader)} ({pct:.1f}%) elapsed {elapsed:.1f}s")
+                last_log = time.time()
     return preds
 
 
@@ -152,6 +162,7 @@ def train_decoder_model(
     fp16: bool = False,
     bf16: bool = False,
     tf32: bool = False,
+    log_every_seconds: float = 1.0,
     checkpoint_every_epochs: int = 2,
     resume_from_checkpoint: bool = True,
     checkpoint_dir: Optional[str] = None,
@@ -159,6 +170,7 @@ def train_decoder_model(
     if learning_rates is None:
         learning_rates = (1e-5, 2e-5, 3e-5)
 
+    print("[info] loading dataset...")
     if train_file and valid_file:
         dataset = load_besstie_from_csv(train_file, valid_file, task=task)
     else:
@@ -182,10 +194,12 @@ def train_decoder_model(
         except Exception:
             pass
 
+    print("[info] loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print("[info] tokenizing dataset for decoder...")
     tokenised_dataset = prepare_decoder_dataset(
         tokenizer=tokenizer,
         dataset=dataset,
@@ -207,6 +221,7 @@ def train_decoder_model(
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
 
+    print("[info] building dataloaders...")
     train_loader = DataLoader(
         tokenised_dataset["train"],
         batch_size=batch_size,
@@ -365,6 +380,9 @@ def train_decoder_model(
         for epoch in range(start_epoch, num_epochs):
             model.train()
             epoch_loss = 0.0
+            epoch_start = time.time()
+            last_log = epoch_start
+            samples_seen = 0
             optimizer.zero_grad(set_to_none=True)
             for step, batch in enumerate(train_loader, start=1):
                 batch = {k: v.to(device, non_blocking=use_cuda) for k, v in batch.items()}
@@ -377,6 +395,7 @@ def train_decoder_model(
                 else:
                     loss.backward()
                 epoch_loss += loss.item() * max(1, grad_accum_steps)
+                samples_seen += batch["input_ids"].size(0)
                 if step % max(1, grad_accum_steps) == 0:
                     if scaler.is_enabled():
                         scaler.step(optimizer)
@@ -384,6 +403,17 @@ def train_decoder_model(
                     else:
                         optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
+                if log_every_seconds and (time.time() - last_log) >= log_every_seconds:
+                    elapsed = time.time() - epoch_start
+                    pct = (step / len(train_loader)) * 100
+                    avg_loss = epoch_loss / max(1, step)
+                    speed = samples_seen / max(1e-6, elapsed)
+                    print(
+                        f"[train] lr={lr} epoch {epoch + 1}/{num_epochs} "
+                        f"step {step}/{len(train_loader)} ({pct:.1f}%) "
+                        f"loss {avg_loss:.4f} samples/s {speed:.1f} elapsed {elapsed:.1f}s"
+                    )
+                    last_log = time.time()
             if len(train_loader) % max(1, grad_accum_steps) != 0:
                 if scaler.is_enabled():
                     scaler.step(optimizer)
@@ -407,6 +437,8 @@ def train_decoder_model(
                 max_length=max_length or 256,
                 fp16=fp16,
                 bf16=bf16,
+                log_every_seconds=log_every_seconds,
+                log_prefix="[eval]",
             )
             metrics = compute_metrics_from_preds(np.array(preds), val_labels)
             print(
@@ -431,6 +463,8 @@ def train_decoder_model(
                 max_length=max_length or 256,
                 fp16=fp16,
                 bf16=bf16,
+                log_every_seconds=log_every_seconds,
+                log_prefix="[eval]",
             )
             metrics = compute_metrics_from_preds(np.array(preds), val_labels)
         if checkpoint_every_epochs and (num_epochs % checkpoint_every_epochs) != 0:
@@ -488,6 +522,7 @@ def main():
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--tf32", action="store_true")
+    parser.add_argument("--log_every_seconds", type=float, default=1.0)
     parser.add_argument("--checkpoint_every_epochs", type=int, default=2)
     parser.add_argument("--no_resume_from_checkpoint", action="store_true")
     parser.add_argument("--checkpoint_dir", type=str, default=None)
@@ -524,6 +559,7 @@ def main():
         fp16=args.fp16,
         bf16=args.bf16,
         tf32=args.tf32,
+        log_every_seconds=args.log_every_seconds,
         checkpoint_every_epochs=args.checkpoint_every_epochs,
         resume_from_checkpoint=not args.no_resume_from_checkpoint,
         checkpoint_dir=args.checkpoint_dir,
