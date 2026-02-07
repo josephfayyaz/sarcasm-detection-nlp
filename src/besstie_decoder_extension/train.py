@@ -367,6 +367,7 @@ def main():
     parser.add_argument("--train_file", type=str)
     parser.add_argument("--valid_file", type=str)
     parser.add_argument("--output_dir", type=str, default="./model_output")
+    [1e-5, 2e-5, 3e-5]
     parser.add_argument("--learning_rates", type=float, nargs="+", default=[1e-5, 2e-5, 3e-5])
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--eval_batch_size", type=int)
