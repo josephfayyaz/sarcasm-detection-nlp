@@ -3,7 +3,7 @@
 # CLI precedence: CLI flags > this config file
 
 common:
-  device: auto          # auto | cuda | cpu
+  device: cuda          # auto | cuda | cpu
 
 train:
   model_name: mistralai/Mistral-Small-Instruct-2409

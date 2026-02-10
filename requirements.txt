@@ -12,3 +12,5 @@ scikit-learn==1.6.1
 torch==2.4.1
 tqdm==4.67.1
 transformers==4.57.3
+seaborn
+matplotlib
