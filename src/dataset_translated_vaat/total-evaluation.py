@@ -40,8 +40,7 @@ def predict_in_batches(
             return_tensors="pt",
         )
         enc = {k: v.to(device) for k, v in enc.items()}
-
-        # VAAT conditioning
+        #  VAAT conditioning
         if variety_ids is not None:
             batch_var_ids = variety_ids[i : i + batch_size]
             enc["variety_ids"] = torch.tensor(batch_var_ids, dtype=torch.long, device=device)
@@ -108,7 +107,6 @@ def _compute_group_metrics(
 
     return results
 
-
 def evaluate_model(
     model_dir: str,
     data: pd.DataFrame,
@@ -116,10 +114,7 @@ def evaluate_model(
     batch_size: int = 4,
     max_length: int = 256,
     min_group_size: int = 1,
-    save_per_variety: bool = True,
-    save_per_source: bool = True,
-    save_per_variety_source: bool = True,
-    save_all: bool = True,
+    save_all: bool = False,
 ):
     model, tokenizer = load_model_and_tokenizer(model_dir, device=device)
     model_name = os.path.basename(model_dir)
@@ -131,11 +126,20 @@ def evaluate_model(
 
     df = data[keep_cols].copy()
 
+    # Adding model name to DataFrame to avoid KeyError when using groupby
+    df["model"] = model_name
+
+    # VAAT: if the loaded model exposes a variety_to_id mapping, build variety_ids for conditioning.
+    variety_ids = None
+    if hasattr(model, "variety_to_id"):
+        if "variety" not in df.columns:
+            raise ValueError("Model requires variety conditioning but 'variety' column is missing.")
+        variety_ids = [int(model.variety_to_id.get(str(v), 0)) for v in df["variety"].tolist()]
     preds, latency_ms = predict_in_batches(
         model=model,
         tokenizer=tokenizer,
         texts=df["text"].tolist(),
-        variety_ids=None,  # If VAAT is used, pass variety_ids here
+        variety_ids=variety_ids,
         batch_size=batch_size,
         max_length=max_length,
     )
@@ -143,107 +147,45 @@ def evaluate_model(
     df["prediction"] = preds
 
     # -----------------------------
-    # 1) Per-variety metrics (same as before, but now richer columns)
+    # 1) General evaluation metrics (no grouping)
     # -----------------------------
-    per_variety = _compute_group_metrics(
+    results = _compute_group_metrics(
         df=df,
-        group_cols=["variety"],
+        group_cols=["model"],
         model_name=model_name,
         min_group_size=min_group_size,
     )
 
-    # Robustness gap over varieties
-    f1s = [r["f1_macro"] for r in per_variety]
-    if len(f1s) > 0:
-        per_variety.append(
-            {
-                "model": model_name,
-                "variety": "__ROBUSTNESS_GAP__",
-                "num_samples": int(df.shape[0]),
-                "accuracy": None,
-                "f1_macro": float(max(f1s) - min(f1s)),
-                "precision": None,
-                "recall": None,
-                "tp": None,
-                "fp": None,
-                "fn": None,
-                "tn": None,
-            }
-        )
+    # Latency row
+    results.append({
+        "model": model_name,
+        "num_samples": int(df.shape[0]),
+        "accuracy": None,
+        "f1_macro": float(latency_ms),
+        "precision": None,
+        "recall": None,
+        "tp": None,
+        "fp": None,
+        "fn": None,
+        "tn": None,
+    })
 
-    # Latency row (kept same convention: stored in f1_macro column)
-    per_variety.append(
-        {
-            "model": model_name,
-            "variety": "__LATENCY_MS_PER_SAMPLE__",
-            "num_samples": int(df.shape[0]),
-            "accuracy": None,
-            "f1_macro": float(latency_ms),
-            "precision": None,
-            "recall": None,
-            "tp": None,
-            "fp": None,
-            "fn": None,
-            "tn": None,
-        }
-    )
-
-    # -----------------------------
-    # 2) Per-source metrics (new)
-    # -----------------------------
-    per_source = []
-    if "source" in df.columns:
-        per_source = _compute_group_metrics(
-            df=df,
-            group_cols=["source"],
-            model_name=model_name,
-            min_group_size=min_group_size,
-        )
-
-    # -----------------------------
-    # 3) Per-variety × per-source metrics (new)
-    # -----------------------------
-    per_variety_source = []
-    if "source" in df.columns:
-        per_variety_source = _compute_group_metrics(
-            df=df,
-            group_cols=["variety", "source"],
-            model_name=model_name,
-            min_group_size=min_group_size,
-        )
-
-    # Saving all output based on the flags
+    # Save final result to a file
     if save_all:
-        if len(per_variety) > 0:
-            out_variety = pd.DataFrame(per_variety).sort_values(["model", "variety"], ascending=[True, True])
-            out_variety.to_csv(f"results/{model_name}_per_variety.csv", index=False)
-            print(f"Saved: {model_name}_per_variety.csv")
-
-        if len(per_source) > 0:
-            out_source = pd.DataFrame(per_source).sort_values(["model", "source"], ascending=[True, True])
-            out_source.to_csv(f"results/{model_name}_per_source.csv", index=False)
-            print(f"Saved: {model_name}_per_source.csv")
-
-        if len(per_variety_source) > 0:
-            out_vs = pd.DataFrame(per_variety_source).sort_values(["model", "variety", "source"], ascending=[True, True, True])
-            out_vs.to_csv(f"results/{model_name}_per_variety_source.csv", index=False)
-            print(f"Saved: {model_name}_per_variety_source.csv")
+        result_df = pd.DataFrame(results)
+        result_df.to_csv(f"results\evaluation_{model_name}_summary.csv", index=False)
+        print(f"Saved: evaluation_{model_name}_summary.csv")
     else:
-        print("No outputs will be saved.")
-
-
+        print("Evaluation complete, but no file saved.")
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--models_root", help="Folder containing model subfolders", default=r".\model_output")
-    parser.add_argument("--validation_csv", help="CSV with columns: text, label, variety (and optionally source)", default=r".\dataset\valid-new.csv")
-    parser.add_argument("--output_prefix", help="Prefix for output CSV files", default="tdata_vat")
-    parser.add_argument("--device", help="auto | cpu | cuda", default="auto")
-    parser.add_argument("--batch_size", type=int, help="CPU: 2-8; GPU: 16-64", default=16)
+    parser.add_argument("--models_root",  help="Folder containing model subfolders", default=r".\model_output")
+    parser.add_argument("--validation_csv",  help="CSV with columns: text, label, variety (and optionally source)", default=r".\dataset\valid-new.csv")
+    parser.add_argument("--output_prefix", help="Prefix for output CSV files",default="tdata_vat")
+    parser.add_argument("--device", help="auto | cpu | cuda",default="auto")
+    parser.add_argument("--batch_size", type=int,  help="CPU: 2-8; GPU: 16-64",default=16)
     parser.add_argument("--max_length", type=int, default=256, help="Try 128 if RAM is tight on CPU")
     parser.add_argument("--min_group_size", type=int, default=1, help="Skip groups with fewer than this many samples")
-    parser.add_argument("--save_per_variety", type=bool, default=True, help="Whether to save per-variety results")
-    parser.add_argument("--save_per_source", type=bool, default=True, help="Whether to save per-source results")
-    parser.add_argument("--save_per_variety_source", type=bool, default=True, help="Whether to save per-variety-source results")
     parser.add_argument("--save_all", type=bool, default=True, help="Whether to save all output results")
 
     args = parser.parse_args()
@@ -258,10 +200,6 @@ def main():
     if len(model_folders) == 0:
         raise ValueError(f"No model folders found in: {args.models_root}")
 
-    all_variety = []
-    all_source = []
-    all_variety_source = []
-
     for model_name in model_folders:
         model_dir = os.path.join(args.models_root, model_name)
         print(f"\nEvaluating model: {model_name}")
@@ -273,9 +211,6 @@ def main():
             batch_size=args.batch_size,
             max_length=args.max_length,
             min_group_size=args.min_group_size,
-            save_per_variety=args.save_per_variety,
-            save_per_source=args.save_per_source,
-            save_per_variety_source=args.save_per_variety_source,
             save_all=args.save_all,
         )
 

@@ -1,0 +1,3 @@
+model,num_samples,accuracy,f1_macro,precision,recall,tp,fp,fn,tn,source
+CNN-over-tokens-translated-data,1207,0.6114333057166529,0.381433487078117,0.1,0.0021691973969631237,1,9,460,737,Google
+CNN-over-tokens-translated-data,1221,0.5888615888615889,0.521883131876018,0.2911111111111111,0.4171974522292994,131,319,183,588,Reddit

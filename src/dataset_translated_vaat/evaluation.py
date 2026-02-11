@@ -204,25 +204,25 @@ def evaluate_model(
     if save_all:
         if len(all_variety) > 0:
             out_variety = pd.DataFrame(all_variety).sort_values(["model", "variety"], ascending=[True, True])
-            out_variety.to_csv(f"{model_name}_per_variety.csv", index=False)
+            out_variety.to_csv(f"results\{model_name}_per_variety.csv", index=False)
             print(f"Saved: {model_name}_per_variety.csv")
 
         if len(all_source) > 0:
             out_source = pd.DataFrame(all_source).sort_values(["model", "source"], ascending=[True, True])
-            out_source.to_csv(f"{model_name}_per_source.csv", index=False)
+            out_source.to_csv(f"results\{model_name}_per_source.csv", index=False)
             print(f"Saved: {model_name}_per_source.csv")
 
         if len(all_variety_source) > 0:
             out_vs = pd.DataFrame(all_variety_source).sort_values(["model", "variety", "source"], ascending=[True, True, True])
-            out_vs.to_csv(f"{model_name}_per_variety_source.csv", index=False)
+            out_vs.to_csv(f"results\{model_name}_per_variety_source.csv", index=False)
             print(f"Saved: {model_name}_per_variety_source.csv")
     else:
         print("No outputs will be saved.")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--models_root",  help="Folder containing model subfolders", default=r".\src\dataset_translated_vaat\model_output")
-    parser.add_argument("--validation_csv",  help="CSV with columns: text, label, variety (and optionally source)", default=r".\src\dataset_translated_vaat\dataset\valid-new.csv")
+    parser.add_argument("--models_root",  help="Folder containing model subfolders", default=r".\model_output")
+    parser.add_argument("--validation_csv",  help="CSV with columns: text, label, variety (and optionally source)", default=r".\dataset\valid-new.csv")
     parser.add_argument("--output_prefix", help="Prefix for output CSV files",default="tdata_vat")
     parser.add_argument("--device", help="auto | cpu | cuda",default="auto")
     parser.add_argument("--batch_size", type=int,  help="CPU: 2-8; GPU: 16-64",default=16)

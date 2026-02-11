@@ -1,0 +1,6 @@
+model,num_samples,accuracy,f1_macro,precision,recall,tp,fp,fn,tn,variety
+attention-pooling-translated-data,2428,,9.971311889723852,,,,,,,__LATENCY_MS_PER_SAMPLE__
+attention-pooling-translated-data,2428,,0.013238696288231877,,,,,,,__ROBUSTNESS_GAP__
+attention-pooling-translated-data,742,0.5067385444743935,0.46378814683768244,0.3333333333333333,0.29328621908127206,83.0,166.0,200.0,293.0,en-AU
+attention-pooling-translated-data,910,0.6483516483516484,0.45054945054945056,0.20952380952380953,0.08494208494208494,22.0,83.0,237.0,568.0,en-IN
+attention-pooling-translated-data,776,0.6481958762886598,0.45631905146860685,0.25609756097560976,0.09012875536480687,21.0,61.0,212.0,482.0,en-UK
