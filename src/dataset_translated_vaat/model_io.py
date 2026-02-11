@@ -104,21 +104,18 @@ def load_model_and_tokenizer(
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
 
+    # ----------------------------
+    # 1) HF default checkpoint
+    # ----------------------------
     if not is_custom_decoder_checkpoint(checkpoint_dir):
         model = AutoModelForSequenceClassification.from_pretrained(checkpoint_dir)
         model.to(device_t)
         model.eval()
-        # If VAAT decoder config includes varieties, attach a helper mapping for evaluation/inference.
-    try:
-        if getattr(decoder_cfg, "decoder_type", None) == "vaat" and getattr(decoder_cfg, "vaat_varieties", None):
-            model.variety_to_id = {v: i for i, v in enumerate(decoder_cfg.vaat_varieties)}
-            model.id_to_variety = list(decoder_cfg.vaat_varieties)
-    except Exception:
-        pass
+        return model, tokenizer
 
-    return model, tokenizer
-
-    # Custom decoder checkpoint
+    # ----------------------------
+    # 2) Custom decoder checkpoint
+    # ----------------------------
     with open(os.path.join(checkpoint_dir, DECODER_CONFIG_FILE), "r", encoding="utf-8") as f:
         cfg_dict = json.load(f)
     decoder_cfg = DecoderConfig.from_dict(cfg_dict)
@@ -127,9 +124,18 @@ def load_model_and_tokenizer(
     hidden_size = _get_hidden_size(encoder.config)
 
     head = build_head(hidden_size=hidden_size, cfg=decoder_cfg)
-    head.load_state_dict(torch.load(os.path.join(checkpoint_dir, DECODER_WEIGHTS_FILE), map_location="cpu"))
+    head.load_state_dict(
+        torch.load(os.path.join(checkpoint_dir, DECODER_WEIGHTS_FILE), map_location="cpu")
+    )
+
     model = EncoderWithCustomHead(encoder=encoder, head=head)
+
+    # ✅ attach mapping for VAAT (so evaluation.py can build variety_ids)
+    if getattr(decoder_cfg, "decoder_type", None) == "vaat" and getattr(decoder_cfg, "vaat_varieties", None):
+        model.variety_to_id = {v: i for i, v in enumerate(decoder_cfg.vaat_varieties)}
+        model.id_to_variety = list(decoder_cfg.vaat_varieties)
 
     model.to(device_t)
     model.eval()
     return model, tokenizer
+

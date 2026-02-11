@@ -75,8 +75,6 @@ class CNNOverTokensHead(nn.Module):
     """
     def __init__(
         self,
-        input_dim,
-        bottleneck_dim,
         hidden_size: int,
         num_labels: int = 2,
         num_filters: int = 128,

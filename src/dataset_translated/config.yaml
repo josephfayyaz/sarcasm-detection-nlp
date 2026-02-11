@@ -8,7 +8,10 @@ train:
   valid_file: ./dataset/valid-new.csv
   output_dir: ./model_output
 
-  learning_rates: [1.0e-5]
+  learning_rates:
+  - 1.0e-05
+  - 2.0e-05
+  - 3.0e-05
   batch_size: 8
   eval_batch_size: null
   num_epochs: 30
