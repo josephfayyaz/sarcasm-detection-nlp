@@ -1,0 +1,6 @@
+model,num_samples,accuracy,f1_macro,precision,recall,tp,fp,fn,tn,variety
+baseline roberta-trans,2428,,10.041949776487648,,,,,,,__LATENCY_MS_PER_SAMPLE__
+baseline roberta-trans,2428,,0.03485884334056444,,,,,,,__ROBUSTNESS_GAP__
+baseline roberta-trans,742,0.6185983827493261,0.38218151540383016,0.0,0.0,0.0,0.0,283.0,459.0,en-AU
+baseline roberta-trans,910,0.7153846153846154,0.4170403587443946,0.0,0.0,0.0,0.0,259.0,651.0,en-IN
+baseline roberta-trans,776,0.6997422680412371,0.4116755117513268,0.0,0.0,0.0,0.0,233.0,543.0,en-UK

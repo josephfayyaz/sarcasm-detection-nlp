@@ -1,0 +1,7 @@
+model,num_samples,accuracy,f1_macro,precision,recall,tp,fp,fn,tn,variety,source
+baseline roberta-trans,260,0.5961538461538461,0.37349397590361444,0.0,0.0,0,0,105,155,en-AU,Google
+baseline roberta-trans,482,0.6307053941908713,0.38676844783715014,0.0,0.0,0,0,178,304,en-AU,Reddit
+baseline roberta-trans,450,0.6222222222222222,0.3835616438356164,0.0,0.0,0,0,170,280,en-IN,Google
+baseline roberta-trans,460,0.8065217391304348,0.4464500601684717,0.0,0.0,0,0,89,371,en-IN,Reddit
+baseline roberta-trans,497,0.6257545271629779,0.3849009900990099,0.0,0.0,0,0,186,311,en-UK,Google
+baseline roberta-trans,279,0.8315412186379928,0.45401174168297453,0.0,0.0,0,0,47,232,en-UK,Reddit

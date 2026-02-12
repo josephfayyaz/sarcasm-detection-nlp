@@ -1,0 +1,3 @@
+model,num_samples,accuracy,f1_macro,precision,recall,tp,fp,fn,tn,source
+baseline roberta-trans,1207,0.6180613090306545,0.3819764464925755,0.0,0.0,0,0,461,746,Google
+baseline roberta-trans,1221,0.7428337428337428,0.42622180451127817,0.0,0.0,0,0,314,907,Reddit
