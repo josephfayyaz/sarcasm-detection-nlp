@@ -1,5 +1,6 @@
 common:
   device: auto
+  
 
 train:
   model_name: roberta-large
@@ -19,7 +20,7 @@ train:
   seed: 42
   use_class_weights: true
 
-  num_workers: 2
+  num_workers: 0
   pin_memory: true
   grad_accum_steps: 1
   max_length: 128

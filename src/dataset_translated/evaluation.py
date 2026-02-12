@@ -239,7 +239,7 @@ def main():
     parser.add_argument("--output_prefix", help="Prefix for output CSV files", default="tdata_vat")
     parser.add_argument("--device", help="auto | cpu | cuda", default="auto")
     parser.add_argument("--batch_size", type=int, help="CPU: 2-8; GPU: 16-64", default=16)
-    parser.add_argument("--max_length", type=int, default=256, help="Try 128 if RAM is tight on CPU")
+    parser.add_argument("--max_length", type=int, default=256, help="Try 128 if RAM is tight on CPU") 
     parser.add_argument("--min_group_size", type=int, default=1, help="Skip groups with fewer than this many samples")
     parser.add_argument("--save_per_variety", type=bool, default=True, help="Whether to save per-variety results")
     parser.add_argument("--save_per_source", type=bool, default=True, help="Whether to save per-source results")
