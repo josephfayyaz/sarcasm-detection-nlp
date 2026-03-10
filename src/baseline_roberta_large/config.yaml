@@ -8,14 +8,13 @@ common:
 train:
   model_name: roberta-large
   task: Sarcasm          # Sarcasm | Sentiment
-  train_file: ./dataset/train-nottranslated.csv
-  valid_file: ./dataset/train-nottranslated.csv
+  train_file: ./dataset/train-translated.csv
+  valid_file: ./dataset/valid-translated.csv
   output_dir: ./model_output
 
   # Grid search over learning rates (best one is saved)
-  learning_rates: [1.0e-5, 2.0e-5, 3.0e-5]
-  #learning_rates: [1.0e-5]
-  batch_size: 8
+  learning_rates: [2.0e-5]  #learning_rates: [1.0e-5]
+  batch_size: 16
   eval_batch_size: null      # null => use batch_size
   num_epochs: 30             # Increased because Early Stopping will handle the stop
   weight_decay: 0.01
@@ -24,9 +23,16 @@ train:
   
   # ---- Early Stopping Settings ----
   early_stopping: true
-  patience: 5
+  patience: 10  
   min_delta: 0.001
   monitor: f1_macro          # f1_macro | accuracy
+
+
+  # ---- تنظیمات جدید برای جلوگیری از Overfit ----
+  warmup_ratio: 0.1       # ۱۰٪ قدم‌ها برای گرم شدن
+  hidden_dropout: 0.2     # دراپ‌آوت لایه‌های مخفی (برای دیتای کم ۰.۳ بگذارید)
+  attention_dropout: 0.2  # دراپ‌آوت لایه‌های توجه
+  freeze_encoder: false   # اگر خیلی اوضاع خراب بود، true کنید
 
   num_workers: 2
   pin_memory: true
@@ -34,9 +40,9 @@ train:
   max_length: 256
 
   # Optimization
-  fp16: false               ###############################################
-  bf16: false               ###############################################
-  tf32: false               ###############################################
+  fp16: True              ###############################################
+  bf16: False              ###############################################
+  tf32: True                 ###############################################
 
 predict:
   checkpoint_dir: ./model_output
